@@ -277,7 +277,7 @@ def train_lstm(
     print "%d test examples" % len(test[0])
 
     # best valid error and corresponding test error
-    best_valid_acc = [1, 1, 1, 1]
+    best_valid_acc = [0, 0, 0, 0]
 
     uidx = 0  # the number of update done
     start_time = time.time()
