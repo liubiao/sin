@@ -172,8 +172,11 @@ def build_model(tparams, options):
     attq = att_layer(tparams, ax, am, qx)
 
     # lstm2
-    projq = lstm_layer(tparams, qemb, qm, options, 'h2', attq)[-1]
-    proja = lstm_layer(tparams, aemb, am, options, 'h2', atta)[-1]
+    projq = lstm_layer(tparams, qemb, qm, options, 'h2', attq)
+    proja = lstm_layer(tparams, aemb, am, options, 'h2', atta)
+
+    projq = (projq * qm[:,:,None]).sum(axis=0) / (qm.sum(axis=0)[:,None] + 1e-6)
+    proja = (proja * am[:,:,None]).sum(axis=0) / (am.sum(axis=0)[:,None] + 1e-6)
 
     projq = dropout_layer(projq, use_noise, trng)
     proja = dropout_layer(proja, use_noise, trng)
