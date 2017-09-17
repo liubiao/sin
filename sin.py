@@ -347,7 +347,7 @@ def train_lstm(
     uidx = 0  # the number of update done
     start_time = time.time()
 
-    frecord = open('record/da-sin.csv', 'w')
+    frecord = open('record/da-sin-conv-ld.csv', 'w')
     for eidx in xrange(max_epochs):
         kf = get_minibatches_idx(len(train[0]), batch_size, shuffle=True)
 
