@@ -60,7 +60,7 @@ def ortho_weight(ndim):
 
 
 def param_init_hlstm(options, params):
-    for h in ['h1', 'hatt', 'cnn_h1', 'cnn_hatt']:
+    for h in ['h1', 'h2', 'hatt', 'cnn_h1', 'cnn_h2', 'cnn_hatt']:
         params['lstm_W_' + h] = numpy.concatenate([ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
@@ -103,7 +103,7 @@ def param_init_cnn(options, params):
     return params
 
 
-def lstm_layer(tparams, dx, mask, options, hierarchy, attl):
+def lstm_layer(tparams, dx, mask, options, hierarchy, attl=None):
 
     n_sentence = dx.shape[0]
     s_maxlen = dx.shape[1]
@@ -123,17 +123,26 @@ def lstm_layer(tparams, dx, mask, options, hierarchy, attl):
         c = tensor.tanh(_slice(preact, 3, options['dim_proj']))
 
         c = f * c_ + i * c
-        c = m_[:, None] * c + (1. - m_)[:, None] * c_
+        if hierarchy in ('h2', 'cnn_h2'):
+            c = m_ * c
+        else:
+            c = m_[:, None] * c + (1. - m_)[:, None] * c_
 
         o = tensor.nnet.sigmoid(_slice(preact, 2, options['dim_proj']) + tensor.dot(c, tparams['lstm_W_po_' + hierarchy]))
         h = o * tensor.tanh(c)
-        h = m_[:, None] * h + (1. - m_)[:, None] * h_
+        if hierarchy in ('h2', 'cnn_h2'): 
+            h = m_ * h
+        else:
+            h = m_[:, None] * h + (1. - m_)[:, None] * h_
 
         return h, c
 
     
     def _h1_step(i, h_, c_, x, m):
         return _step(m[:,i], x[:,i,:], h_, c_)
+
+    def _h2_step(x_, m_, h_, c_):
+        return _step(m_, x_, h_, c_)
 
     def _att_step(ch, cm, ph, pm):
         cand = tensor.tanh(tensor.dot(ph, tparams[attl + 'att_cand_ph'])[:,None,:] +\
@@ -182,6 +191,17 @@ def lstm_layer(tparams, dx, mask, options, hierarchy, attl):
                         name='lstm_' + hierarchy,
                         n_steps=s_maxlen)
         return rval[0][-1]
+
+
+    elif hierarchy in ('h2', 'cnn_h2'):
+        act = tensor.dot(dx, tparams['lstm_W_' + hierarchy]) + tparams['lstm_b_' + hierarchy]
+        rval, updates = theano.scan(_h2_step,
+                        sequences=[act, mask],
+                        outputs_info=[tensor.alloc(numpy_floatX(0.), options['dim_proj']),
+                                      tensor.alloc(numpy_floatX(0.), options['dim_proj'])],
+                        name='lstm_' + hierarchy,
+                        n_steps=n_sentence)
+        return rval[0]
 
 
 def cnn_layer(tparams, dx, dm, width):
@@ -255,8 +275,12 @@ def build_model(tparams, options):
     sentence_vectors_cnn = lstm_layer(tparams, emb_cnn, mask_cnn, options, 'cnn_h1', 'cnn')
     print 'sentence_vectors.ndim = ', sentence_vectors.ndim
 
-    proj = dropout_layer(sentence_vectors, use_noise, trng)
-    proj_cnn = dropout_layer(sentence_vectors_cnn, use_noise, trng)
+    proj = lstm_layer(tparams, sentence_vectors, mask[:,0], options, 'h2')
+    proj_cnn = lstm_layer(tparams, sentence_vectors_cnn, mask[:,0], options, 'cnn_h2')
+    print 'final_proj.ndim = ', proj.ndim
+
+    proj = dropout_layer(proj, use_noise, trng)
+    proj_cnn = dropout_layer(proj_cnn, use_noise, trng)
 
     pred_prob = tensor.nnet.softmax(tensor.dot(proj, tparams['U']) +\
                                     tensor.dot(proj_cnn, tparams['U_cnn']) + tparams['b'])
