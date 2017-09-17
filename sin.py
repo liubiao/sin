@@ -9,7 +9,7 @@ from datetime import datetime
 import theano
 from theano import config
 import theano.tensor as tensor
-from theano.tensor.shared_randomstreams import RandomStreams
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 from data.util import load_data, prepare_data
 from util import *
@@ -287,7 +287,7 @@ def train_lstm(
     print "%d valid examples" % len(valid[0])
     print "%d test examples" % len(test[0])
 
-    bmap = (0,0,0,0)
+    best_valid_map = (0,0,0,0)
     kf_valid = get_minibatches_idx(valid, valid_batch_size, shuffle=False)
     kf_test = get_minibatches_idx(test, valid_batch_size, shuffle=False)
 
@@ -327,17 +327,20 @@ def train_lstm(
 
             if np.mod(uidx, validFreq) == 0:
                 use_noise.set_value(0.)
+                kf_train_sample = get_minibatches_idx(train, valid_batch_size, shuffle=True, sample_ratio=0.1)
+                train_map, train_mrr = evaluate(f_pred_prob, train, kf_train_sample)
                 valid_map, valid_mrr = evaluate(f_pred_prob, valid, kf_valid)
                 test_map, test_mrr = evaluate(f_pred_prob, test, kf_test)
 
-                frecord.write('%.6f,%.6f,%.6f,%.6f\n' % (valid_map, test_map, valid_mrr, test_mrr))
+                frecord.write('%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n' % (train_map, valid_map, test_map, train_mrr, valid_mrr, test_mrr))
                 frecord.flush()
 
-                if valid_map >= bmap[2]:
-                    bmap = (valid_map, valid_mrr, test_map, test_mrr, eidx)
-                    
-                print 'current:\tvalid:%.3f,%.3f\ttest:%.3f,%.3f' % (valid_map, valid_mrr, test_map, test_mrr)
-                print 'best_valid:\tvalid:%.3f,%.3f\ttest:%.3f,%.3f\tepoch:%d' % bmap
+                if valid_map >= best_valid_map[2]:
+                    best_valid_map = (train_map, train_mrr, valid_map, valid_mrr, test_map, test_mrr, eidx)
+
+                print 'curr\ttrain:%.3f,%.3f\tvalid:%.3f,%.3f\ttest:%.3f,%.3f' % \
+                        (train_map, train_mrr, valid_map, valid_mrr, test_map, test_mrr)
+                print 'best_valid_map\ttrain:%.3f,%.3f\tvalid:%.3f,%.3f\ttest:%.3f,%.3f\tepoch:%d' % best_valid_map
 
 
     end_time = time.time()
@@ -347,7 +350,7 @@ def train_lstm(
         (eidx + 1), (end_time - start_time) / (1. * (eidx + 1)))
     print >> sys.stderr, ('Training took %.1fs' %
                           (end_time - start_time))
-    return bmap
+    return best_valid_map
 
 
 if __name__ == '__main__':
