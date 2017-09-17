@@ -9,7 +9,7 @@ from datetime import datetime
 import theano
 from theano import config
 import theano.tensor as tensor
-from theano.tensor.shared_randomstreams import RandomStreams
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 from data.util import load_data, prepare_data
 from util import *
@@ -44,10 +44,13 @@ def init_params(options):
 
     params['Wemb'] = np.array(Wemb, dtype='float32')
     params = param_init_hlstm(options, params)
+    params = param_init_cnn(options, params)
 
     # classifier
     params['Uq'] = 0.01 * np.random.randn(options['dim_proj']).astype(config.floatX)
     params['Ua'] = 0.01 * np.random.randn(options['dim_proj']).astype(config.floatX)
+    params['Uq_cnn2'] = 0.01 * np.random.randn(options['dim_proj']).astype(config.floatX)
+    params['Ua_cnn2'] = 0.01 * np.random.randn(options['dim_proj']).astype(config.floatX)
     params['b'] = numpy_floatX(0)
 
     return params
@@ -60,7 +63,7 @@ def ortho_weight(ndim):
 
 
 def param_init_hlstm(options, params):
-    for h in ['h1', 'h2']:
+    for h in ['h1', 'h2', 'cnn2_h1', 'cnn2_h2']:
         params['lstm_W_' + h] = np.concatenate([ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
@@ -79,21 +82,27 @@ def param_init_hlstm(options, params):
         b[options['dim_proj'] : 2 * options['dim_proj']] += 1.0
         params['lstm_b_' + h] = b
 
-    params['att_W'] = np.concatenate([ortho_weight(options['dim_proj']),
-                           ortho_weight(options['dim_proj']),
-                           ortho_weight(options['dim_proj']),
-                           ortho_weight(options['dim_proj'])], axis=1)
+    for attl in ['a', 'cnn2']:
+        params[attl + 'att_W'] = np.concatenate([ortho_weight(options['dim_proj']),
+                               ortho_weight(options['dim_proj']),
+                               ortho_weight(options['dim_proj']),
+                               ortho_weight(options['dim_proj'])], axis=1)
 
-    params['att_cand_ph'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_cand_ch'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_cand_b'] = 0.01 * np.random.randn(options['dim_proj'],).astype(config.floatX)
+        params[attl + 'att_cand_ph'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_cand_ch'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_cand_b'] = 0.01 * np.random.randn(options['dim_proj'],).astype(config.floatX)
 
-    params['att_i_ph'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_i_ch'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_i_b'] = 0.01 * np.random.randn(options['dim_proj'],).astype(config.floatX)
+        params[attl + 'att_i_ph'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_i_ch'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_i_b'] = 0.01 * np.random.randn(options['dim_proj'],).astype(config.floatX)
     
     return params
 
+def param_init_cnn(options, params):
+    params['cnn_filter_20'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype('float32')
+    params['cnn_filter_21'] = 0.01 * np.random.randn(options['dim_proj'], options['dim_proj']).astype('float32')
+    params['cnn_b_2'] = 0.01 * np.random.randn(options['dim_proj']).astype('float32')
+    return params
 
 
 def lstm_layer(tparams, dx, dm, options, hierarchy, att=None):
@@ -132,17 +141,34 @@ def lstm_layer(tparams, dx, dm, options, hierarchy, att=None):
     return rv[0]
 
 
-def att_layer(tparams, ph, pm, ch):
-    cand = tensor.tanh(tensor.dot(ph, tparams['att_cand_ph'])[:,None,:,:] +\
-                    tensor.dot(ch, tparams['att_cand_ch'])[None,:,:,:] +\
-                    tparams['att_cand_b'])
-    i = tensor.nnet.sigmoid(tensor.dot(ph, tparams['att_i_ph'])[:,None,:,:] +\
-                    tensor.dot(ch, tparams['att_i_ch'])[None,:,:,:] +\
-                    tparams['att_i_b'])
+def att_layer(tparams, ph, pm, ch, attl):
+    cand = tensor.tanh(tensor.dot(ph, tparams[attl + 'att_cand_ph'])[:,None,:,:] +\
+                    tensor.dot(ch, tparams[attl + 'att_cand_ch'])[None,:,:,:] +\
+                    tparams[attl + 'att_cand_b'])
+    i = tensor.nnet.sigmoid(tensor.dot(ph, tparams[attl + 'att_i_ph'])[:,None,:,:] +\
+                    tensor.dot(ch, tparams[attl + 'att_i_ch'])[None,:,:,:] +\
+                    tparams[attl + 'att_i_b'])
     catts = (cand * i * pm[:,None,:,None]).sum(axis=0) 
-    catts = tensor.dot(catts, tparams['att_W'])
+    catts = tensor.dot(catts, tparams[attl + 'att_W'])
     return catts
 
+
+def cnn_layer(tparams, dx, dm, width):
+    def _step(i):
+        x = tparams['cnn_b_%d' % width]
+        m = 1 
+        for j in range(width):
+            x += tensor.dot(dx[i + j], tparams['cnn_filter_%d%d' % (width, j)])
+            m *= dm[i + j]
+        x = tensor.tanh(x)
+        return x, m
+    maxlen = dx.shape[0]
+    i = tensor.arange(maxlen - width + 1)
+    rv, up = theano.scan(_step, 
+                        sequences=[i],
+                        n_steps=maxlen - width + 1
+                        )
+    return rv[0], rv[1]
 
 
 def build_model(tparams, options):
@@ -164,22 +190,42 @@ def build_model(tparams, options):
     qemb = tparams['Wemb'][q.flatten()].reshape([qmaxlen, qn, options['dim_proj']])
     qx = lstm_layer(tparams, qemb, qm, options, 'h1')
 
+    cnn2_qemb, cnn2_qm = cnn_layer(tparams, qemb, qm, 2)
+    cnn2_qx = lstm_layer(tparams, cnn2_qemb, cnn2_qm, options, 'cnn2_h1')
+
     aemb = tparams['Wemb'][a.flatten()].reshape([amaxlen, an, options['dim_proj']])
     ax = lstm_layer(tparams, aemb, am, options, 'h1')
 
+    cnn2_aemb, cnn2_am = cnn_layer(tparams, aemb, am, 2)
+    cnn2_ax = lstm_layer(tparams, cnn2_aemb, cnn2_am, options, 'cnn2_h1')
+
     # att layer
-    atta = att_layer(tparams, qx, qm, ax)
-    attq = att_layer(tparams, ax, am, qx)
+    atta = att_layer(tparams, qx, qm, ax, 'a')
+    attq = att_layer(tparams, ax, am, qx, 'a')
+
+    cnn2_atta = att_layer(tparams, cnn2_qx, cnn2_qm, cnn2_ax, 'cnn2')
+    cnn2_attq = att_layer(tparams, cnn2_ax, cnn2_am, cnn2_qx, 'cnn2')
 
     # lstm2
-    projq = lstm_layer(tparams, qemb, qm, options, 'h2', attq)[-1]
-    proja = lstm_layer(tparams, aemb, am, options, 'h2', atta)[-1]
+    projq = lstm_layer(tparams, qemb, qm, options, 'h2', attq)#[-1]
+    proja = lstm_layer(tparams, aemb, am, options, 'h2', atta)#[-1]
+    cnn2_projq = lstm_layer(tparams, cnn2_qemb, cnn2_qm, options, 'cnn2_h2', cnn2_attq)#[-1]
+    cnn2_proja = lstm_layer(tparams, cnn2_aemb, cnn2_am, options, 'cnn2_h2', cnn2_atta)#[-1]
+
+    projq = (projq * qm[:,:,None]).sum(axis=0) / (qm.sum(axis=0)[:,None] + 1e-6)
+    proja = (proja * am[:,:,None]).sum(axis=0) / (am.sum(axis=0)[:,None] + 1e-6)
+    cnn2_projq = (cnn2_projq * cnn2_qm[:,:,None]).sum(axis=0) / (cnn2_qm.sum(axis=0)[:,None] + 1e-6)
+    cnn2_proja = (cnn2_proja * cnn2_am[:,:,None]).sum(axis=0) / (cnn2_am.sum(axis=0)[:,None] + 1e-6)
 
     projq = dropout_layer(projq, use_noise, trng)
     proja = dropout_layer(proja, use_noise, trng)
+    cnn2_projq = dropout_layer(cnn2_projq, use_noise, trng)
+    cnn2_proja = dropout_layer(cnn2_proja, use_noise, trng)
 
     pred_prob = tensor.nnet.sigmoid(tensor.dot(projq, tparams['Uq']) +\
                                     tensor.dot(proja, tparams['Ua']) +\
+                                    tensor.dot(cnn2_projq, tparams['Uq_cnn2']) +\
+                                    tensor.dot(cnn2_proja, tparams['Ua_cnn2']) +\
                                     tparams['b'])
 
 
@@ -287,7 +333,7 @@ def train_lstm(
     print "%d valid examples" % len(valid[0])
     print "%d test examples" % len(test[0])
 
-    bmap = (0,0,0,0)
+    best_valid_map = (0,0,0,0,0,0)
     kf_valid = get_minibatches_idx(valid, valid_batch_size, shuffle=False)
     kf_test = get_minibatches_idx(test, valid_batch_size, shuffle=False)
 
@@ -295,7 +341,8 @@ def train_lstm(
     start_time = time.time()
     if not os.path.exists('record'):
         os.mkdir('record')
-    frecord = open('record/as-sin.csv', 'w')
+    frecord = open('record/as-sin-conv.csv', 'w')
+
     for eidx in range(max_epochs):
         # Get new shuffled index for the training set.
         kf = get_minibatches_idx(train, batch_size)
@@ -327,17 +374,20 @@ def train_lstm(
 
             if np.mod(uidx, validFreq) == 0:
                 use_noise.set_value(0.)
+                kf_train_sample = get_minibatches_idx(train, valid_batch_size, shuffle=True, sample_ratio=0.1)
+                train_map, train_mrr = evaluate(f_pred_prob, train, kf_train_sample)
                 valid_map, valid_mrr = evaluate(f_pred_prob, valid, kf_valid)
                 test_map, test_mrr = evaluate(f_pred_prob, test, kf_test)
 
-                frecord.write('%.6f,%.6f,%.6f,%.6f\n' % (valid_map, test_map, valid_mrr, test_mrr))
+                frecord.write('%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n' % (train_map, valid_map, test_map, train_mrr, valid_mrr, test_mrr))
                 frecord.flush()
 
-                if valid_map >= bmap[2]:
-                    bmap = (valid_map, valid_mrr, test_map, test_mrr, eidx)
+                if valid_map >= best_valid_map[2]:
+                    best_valid_map = (train_map, train_mrr, valid_map, valid_mrr, test_map, test_mrr, eidx)
                     
-                print 'current:\tvalid:%.3f,%.3f\ttest:%.3f,%.3f' % (valid_map, valid_mrr, test_map, test_mrr)
-                print 'best_valid:\tvalid:%.3f,%.3f\ttest:%.3f,%.3f\tepoch:%d' % bmap
+                print 'curr\ttrain:%.3f,%.3f\tvalid:%.3f,%.3f\ttest:%.3f,%.3f' % \
+                        (train_map, train_mrr, valid_map, valid_mrr, test_map, test_mrr)
+                print 'best_valid_map\ttrain:%.3f,%.3f\tvalid:%.3f,%.3f\ttest:%.3f,%.3f\tepoch:%d' % best_valid_map
 
 
     end_time = time.time()
@@ -347,7 +397,7 @@ def train_lstm(
         (eidx + 1), (end_time - start_time) / (1. * (eidx + 1)))
     print >> sys.stderr, ('Training took %.1fs' %
                           (end_time - start_time))
-    return bmap
+    return best_valid_map
 
 
 if __name__ == '__main__':
