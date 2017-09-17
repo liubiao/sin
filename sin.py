@@ -35,9 +35,11 @@ def init_params(options):
     params['Wemb'] = numpy.array(Wemb, dtype='float32')
 
     params = param_init_hlstm(options, params)
+    params = param_init_cnn(options, params)
 
     # classifier
     params['U'] = 0.01 * numpy.random.randn(options['dim_proj'], options['ydim']).astype(config.floatX)
+    params['U_cnn'] = 0.01 * numpy.random.randn(options['dim_proj'], options['ydim']).astype(config.floatX)
     params['b'] = numpy.zeros((options['ydim'],)).astype(config.floatX)
 
     return params
@@ -58,7 +60,7 @@ def ortho_weight(ndim):
 
 
 def param_init_hlstm(options, params):
-    for h in ['h1', 'hatt']:
+    for h in ['h1', 'hatt', 'cnn_h1', 'cnn_hatt']:
         params['lstm_W_' + h] = numpy.concatenate([ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
@@ -77,23 +79,31 @@ def param_init_hlstm(options, params):
         b[options['dim_proj'] : 2 * options['dim_proj']] += 1.0
         params['lstm_b_' + h] = b
 
-    params['att_W'] = numpy.concatenate([ortho_weight(options['dim_proj']),
+    for attl in ['a', 'cnn']:
+        params[attl + 'att_W'] = numpy.concatenate([ortho_weight(options['dim_proj']),
                            ortho_weight(options['dim_proj']),
                            ortho_weight(options['dim_proj']),
                            ortho_weight(options['dim_proj'])], axis=1)
 
-    params['att_cand_ph'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_cand_ch'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_cand_b'] = 0.01 * numpy.random.randn(options['dim_proj'],).astype(config.floatX)
+        params[attl + 'att_cand_ph'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_cand_ch'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_cand_b'] = 0.01 * numpy.random.randn(options['dim_proj'],).astype(config.floatX)
 
-    params['att_i_ph'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_i_ch'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
-    params['att_i_b'] = 0.01 * numpy.random.randn(options['dim_proj'],).astype(config.floatX)
+        params[attl + 'att_i_ph'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_i_ch'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype(config.floatX)
+        params[attl + 'att_i_b'] = 0.01 * numpy.random.randn(options['dim_proj'],).astype(config.floatX)
 
     return params
 
 
-def lstm_layer(tparams, dx, mask, options, hierarchy):
+def param_init_cnn(options, params):
+    params['cnn_filter_20'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype('float32')
+    params['cnn_filter_21'] = 0.01 * numpy.random.randn(options['dim_proj'], options['dim_proj']).astype('float32')
+    params['cnn_b_2'] = 0.01 * numpy.random.randn(options['dim_proj']).astype('float32')
+    return params
+
+
+def lstm_layer(tparams, dx, mask, options, hierarchy, attl):
 
     n_sentence = dx.shape[0]
     s_maxlen = dx.shape[1]
@@ -126,20 +136,22 @@ def lstm_layer(tparams, dx, mask, options, hierarchy):
         return _step(m[:,i], x[:,i,:], h_, c_)
 
     def _att_step(ch, cm, ph, pm):
-        cand = tensor.tanh(tensor.dot(ph, tparams['att_cand_ph'])[:,None,:] +\
-                        tensor.dot(ch, tparams['att_cand_ch'])[None,:,:] +\
-                        tparams['att_cand_b'])
-        i = tensor.nnet.sigmoid(tensor.dot(ph, tparams['att_i_ph'])[:,None,:] +\
-                        tensor.dot(ch, tparams['att_i_ch'])[None,:,:] +\
-                        tparams['att_i_b'])
+        cand = tensor.tanh(tensor.dot(ph, tparams[attl + 'att_cand_ph'])[:,None,:] +\
+                        tensor.dot(ch, tparams[attl + 'att_cand_ch'])[None,:,:] +\
+                        tparams[attl + 'att_cand_b'])
+        i = tensor.nnet.sigmoid(tensor.dot(ph, tparams[attl + 'att_i_ph'])[:,None,:] +\
+                        tensor.dot(ch, tparams[attl + 'att_i_ch'])[None,:,:] +\
+                        tparams[attl + 'att_i_b'])
         catts = (cand * i * pm[:,None,None]).sum(axis=0)
         return ch, cm, catts
 
 
-    if hierarchy == 'h1':
-        i = tensor.arange(s_maxlen)
+    if hierarchy in ('h1', 'cnn_h1'):
+        
+        hbk = hierarchy
 
-        hierarchy = 'hatt'
+        i = tensor.arange(s_maxlen)
+        hierarchy = 'hatt' if hbk == 'h1' else 'cnn_hatt'
         act = tensor.dot(dx, tparams['lstm_W_' + hierarchy]) + tparams['lstm_b_' + hierarchy]
         rv1, up1 = theano.scan(_h1_step,
                         sequences=[i],
@@ -157,10 +169,10 @@ def lstm_layer(tparams, dx, mask, options, hierarchy):
                         name='lstm_att',
                         n_steps=n_sentence)
 
-        hierarchy = 'h1'
-        act = tensor.dot(dx, tparams['lstm_W_h1']) +\
-                        tensor.dot(rv2[2], tparams['att_W']) +\
-                        tparams['lstm_b_h1']
+        hierarchy = hbk
+        act = tensor.dot(dx, tparams['lstm_W_' + hierarchy]) +\
+                        tensor.dot(rv2[2], tparams[attl + 'att_W']) +\
+                        tparams['lstm_b_' + hierarchy]
 
         rval, updates = theano.scan(_h1_step,
                         sequences=[i],
@@ -170,6 +182,30 @@ def lstm_layer(tparams, dx, mask, options, hierarchy):
                         name='lstm_' + hierarchy,
                         n_steps=s_maxlen)
         return rval[0][-1]
+
+
+def cnn_layer(tparams, dx, dm, width):
+
+    dx = dx.dimshuffle((1,0,2))
+    dm = dm.dimshuffle((1,0))
+
+    def _step(i):
+        x = tparams['cnn_b_%d' % width]
+        m = 1
+        for j in range(width):
+            x += tensor.dot(dx[i + j], tparams['cnn_filter_%d%d' % (width, j)])
+            m *= dm[i + j]
+        x = tensor.tanh(x)
+        return x, m
+
+    maxlen = dx.shape[0]
+    i = tensor.arange(maxlen - width + 1)
+    rv, up = theano.scan(_step,
+                        sequences=[i],
+                        n_steps=maxlen - width + 1
+                        )
+
+    return rv[0].dimshuffle((1,0,2)), rv[1].dimshuffle((1,0))
 
 
 def adadelta(tparams, grads, x, mask, y, cost, err):
@@ -213,12 +249,17 @@ def build_model(tparams, options):
 
     # hlstm_h1: calculate sentence vectors 
     emb = tparams['Wemb'][x.flatten()].reshape([n_sentence, s_maxlen, options['dim_proj']])
-    sentence_vectors = lstm_layer(tparams, emb, mask, options, 'h1')
+    emb_cnn, mask_cnn = cnn_layer(tparams, emb, mask, 2)
+
+    sentence_vectors = lstm_layer(tparams, emb, mask, options, 'h1', 'a')
+    sentence_vectors_cnn = lstm_layer(tparams, emb_cnn, mask_cnn, options, 'cnn_h1', 'cnn')
     print 'sentence_vectors.ndim = ', sentence_vectors.ndim
 
     proj = dropout_layer(sentence_vectors, use_noise, trng)
+    proj_cnn = dropout_layer(sentence_vectors_cnn, use_noise, trng)
 
-    pred_prob = tensor.nnet.softmax(tensor.dot(proj, tparams['U']) + tparams['b'])
+    pred_prob = tensor.nnet.softmax(tensor.dot(proj, tparams['U']) +\
+                                    tensor.dot(proj_cnn, tparams['U_cnn']) + tparams['b'])
     pred = pred_prob.argmax(axis=1)
 
     cost = (-tensor.log(pred_prob[tensor.arange(n_sentence), y.flatten()] + 1e-6) * mask[:,0].flatten()).sum() / mask[:,0].sum()
