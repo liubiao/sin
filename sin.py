@@ -14,7 +14,6 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from data.util import load_data, prepare_data
 from util import *
 
-
 def dropout_layer(state_before, use_noise, trng):
     proj = tensor.switch(use_noise,
                          (state_before *
@@ -58,7 +57,7 @@ def ortho_weight(ndim):
 
 
 def param_init_hlstm(options, params):
-    for h in ['h1', 'hatt']:
+    for h in ['h1', 'h2', 'hatt']:
         params['lstm_W_' + h] = numpy.concatenate([ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
                                ortho_weight(options['dim_proj']),
@@ -113,17 +112,26 @@ def lstm_layer(tparams, dx, mask, options, hierarchy):
         c = tensor.tanh(_slice(preact, 3, options['dim_proj']))
 
         c = f * c_ + i * c
-        c = m_[:, None] * c + (1. - m_)[:, None] * c_
+        if hierarchy == 'h2':
+            c = m_ * c
+        else:
+            c = m_[:, None] * c + (1. - m_)[:, None] * c_
 
         o = tensor.nnet.sigmoid(_slice(preact, 2, options['dim_proj']) + tensor.dot(c, tparams['lstm_W_po_' + hierarchy]))
         h = o * tensor.tanh(c)
-        h = m_[:, None] * h + (1. - m_)[:, None] * h_
+        if hierarchy == 'h2': 
+            h = m_ * h
+        else:
+            h = m_[:, None] * h + (1. - m_)[:, None] * h_
 
         return h, c
 
     
     def _h1_step(i, h_, c_, x, m):
         return _step(m[:,i], x[:,i,:], h_, c_)
+
+    def _h2_step(x_, m_, h_, c_):
+        return _step(m_, x_, h_, c_)
 
     def _att_step(ch, cm, ph, pm):
         cand = tensor.tanh(tensor.dot(ph, tparams['att_cand_ph'])[:,None,:] +\
@@ -171,6 +179,16 @@ def lstm_layer(tparams, dx, mask, options, hierarchy):
                         n_steps=s_maxlen)
         return rval[0][-1]
 
+    elif hierarchy == 'h2':
+        act = tensor.dot(dx, tparams['lstm_W_' + hierarchy]) + tparams['lstm_b_' + hierarchy]
+        rval, updates = theano.scan(_h2_step,
+                        sequences=[act, mask],
+                        outputs_info=[tensor.alloc(numpy_floatX(0.), options['dim_proj']),
+                                      tensor.alloc(numpy_floatX(0.), options['dim_proj'])],
+                        name='lstm_' + hierarchy,
+                        n_steps=n_sentence)
+        return rval[0]
+
 
 def adadelta(tparams, grads, x, mask, y, cost, err):
     # [ADADELTA] Matthew D. Zeiler, *ADADELTA: An Adaptive Learning Rate Method*, arXiv:1212.5701.
@@ -216,7 +234,11 @@ def build_model(tparams, options):
     sentence_vectors = lstm_layer(tparams, emb, mask, options, 'h1')
     print 'sentence_vectors.ndim = ', sentence_vectors.ndim
 
-    proj = dropout_layer(sentence_vectors, use_noise, trng)
+    # hlstm_h2: consider sentence dependencies
+    proj = lstm_layer(tparams, sentence_vectors, mask[:,0], options, 'h2')
+    print 'final_proj.ndim = ', proj.ndim
+
+    proj = dropout_layer(proj, use_noise, trng)
 
     pred_prob = tensor.nnet.softmax(tensor.dot(proj, tparams['U']) + tparams['b'])
     pred = pred_prob.argmax(axis=1)
@@ -277,12 +299,12 @@ def train_lstm(
     print "%d test examples" % len(test[0])
 
     # best valid error and corresponding test error
-    best_valid_acc = [1, 1, 1, 1]
+    best_valid_acc = (0, 0, 0, 0)
 
     uidx = 0  # the number of update done
     start_time = time.time()
 
-    frecord = open('record/da-sin.csv', 'w')
+    frecord = open('record/da-sin-ld.csv', 'w')
     for eidx in xrange(max_epochs):
         kf = get_minibatches_idx(len(train[0]), batch_size, shuffle=True)
 
