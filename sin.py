@@ -333,7 +333,7 @@ def train_lstm(
     print "%d valid examples" % len(valid[0])
     print "%d test examples" % len(test[0])
 
-    best_valid_map = (0,0,0,0,0,0)
+    best_valid_map = (0,0,0,0,0,0,0)
     kf_valid = get_minibatches_idx(valid, valid_batch_size, shuffle=False)
     kf_test = get_minibatches_idx(test, valid_batch_size, shuffle=False)
 
